@@ -1,72 +1,200 @@
-# Transfer Learning for Pokémon Type Classification
+# Pokémon Type Classification
 
-## Overview
+A progressive deep learning study on image classification applied to a Pokémon type dataset, covering three modelling approaches of increasing complexity — from a basic MLP to fine-tuned transfer learning.
 
-This notebook applies Transfer Learning to classify Pokémon images into 9 types: Bug, Fighting, Fire, Grass, Ground, Normal, Poison, Rock, and Water. Pre-trained ImageNet backbones (ResNet-50, EfficientNet-B0/B2, MobileNetV3-Large) are evaluated with progressive fine-tuning, data augmentation, and regularisation.
+The project was structured as a Kaggle competition, with each task producing a submission CSV for evaluation. All notebooks run on Google Colab with a T4 GPU.
+
+---
 
 ## Dataset
 
-1,194 training images across 9 classes. All images are 400×300 px PNG files. Class imbalance ratio of 4.20 (Water: 252 images vs Fighting: 60 images). Stratified 80/20 train/validation split. No missing files or duplicate IDs.
+The dataset contains ~3,600 labelled Pokémon images (64×64 PNG, RGB) across **9 type classes**:
+
+`Bug · Fighting · Fire · Grass · Ground · Normal · Poison · Rock · Water`
+
+| Split | Size |
+|-------|------|
+| Train | ~2,880 images |
+| Test  | held-out (no labels) |
+
+**Class distribution** is moderately imbalanced (imbalance ratio ≈ 2.76 — Water is the most frequent class, Ground the least). Normalised entropy ≈ 0.97, indicating reasonable diversity across classes. All images share a uniform 64×64 resolution with no missing files or duplicate IDs.
 
 ---
 
-## Notebook Structure
+---
 
-### EDA
+## Tasks
 
-Full exploratory analysis: class distribution pie chart (type-coloured), normalised entropy (0.9469) and Gini index (0.8622) confirming moderate imbalance, mean RGB values per type, image sharpness via Laplacian variance (mean: 1515 — high but variable), resolution check, LBP-based texture complexity per class, and t-SNE on raw pixels to assess class separability.
+### Task 1 — Multilayer Perceptron (MLP)
+
+`task1.ipynb`
+
+A fully connected network trained on flattened pixel vectors (64×64×3 = 12,288 input features).
+
+**Architecture** — 4-layer MLP:
+Input (12288)  
+→ Linear(1024)  
+→ BatchNorm1d(1024)  
+→ LeakyReLU  
+→ Dropout(0.5)  
+
+→ Linear(256)  
+→ BatchNorm1d(256)  
+→ LeakyReLU  
+→ Dropout(0.4)  
+
+→ Linear(64)  
+→ BatchNorm1d(64)  
+→ LeakyReLU  
+→ Dropout(0.3)  
+
+→ Linear(9)
+
+
+**Key design choices:**
+- Kaiming Normal weight initialisation (adapted for LeakyReLU)
+- Square-root class weights in `CrossEntropyLoss` to address imbalance
+- Adam optimiser (`lr=1e-4`, `weight_decay=1e-4`) with `ReduceLROnPlateau`
+- Early stopping (patience = 15), model checkpointed on best validation loss
+- Training augmentation: horizontal flip, random resized crop, random rotation
 
 ---
 
-### 3.1 — Model Selection & Frozen Baseline
+### Task 2 — Convolutional Neural Network (CNN)
 
-Four models evaluated with a fully frozen backbone (head-only training, 10 epochs):
+`task2.ipynb`
 
-| Model | Val Acc (frozen baseline) |
+A custom CNN that preserves spatial structure, contrasting directly with the MLP baseline.
+
+**Architecture** — 3 convolutional blocks + Global Average Pooling head:
+Input (3×64×64)
+
+→ Block 1
+  - Conv2d(32)
+  - BatchNorm2d(32)
+  - ReLU
+  - Conv2d(32)
+  - BatchNorm2d(32)
+  - ReLU
+  - MaxPool2d
+  - Dropout2d(0.1)
+  - Output: 32×32×32
+
+→ Block 2
+  - Conv2d(64)
+  - BatchNorm2d(64)
+  - ReLU
+  - Conv2d(64)
+  - BatchNorm2d(64)
+  - ReLU
+  - MaxPool2d
+  - Dropout2d(0.2)
+  - Output: 64×16×16
+
+→ Block 3
+  - Conv2d(128)
+  - BatchNorm2d(128)
+  - ReLU
+  - Conv2d(128)
+  - BatchNorm2d(128)
+  - ReLU
+  - MaxPool2d
+  - Dropout2d(0.3)
+  - Output: 128×8×8
+
+→ GlobalAveragePooling
+  - Output: (128,)
+
+→ Linear(256)
+→ BatchNorm1d(256)
+→ ReLU
+→ Dropout(0.5)
+
+→ Linear(9)
+
+→ Output: 9 classes
+
+Global Average Pooling replaces a flat dense layer, drastically reducing parameter count and improving regularisation.
+
+**Key design choices:**
+- Same square-root class weighting as Task 1
+- Adam (`lr=1e-3`, `weight_decay=1e-4`) with `ReduceLROnPlateau` (factor 0.5, patience 7)
+- Early stopping (patience = 7); training tracks loss, accuracy, and macro F1 per epoch
+- Stronger augmentation: vertical flip, ImageNet-style normalisation
+
+---
+
+### Task 3 — Transfer Learning & Fine-Tuning
+
+`task3.ipynb`
+
+Transfer learning from ImageNet-pretrained backbones, with progressive fine-tuning and advanced regularisation. Images are resized to 224×224 to match pretrained input requirements.
+
+**Models evaluated in frozen baseline (10 epochs, head only):**
+
+| Model | Val Accuracy |
 |---|---|
-| ResNet-50 | **21.34%** |
+| ResNet-50 | 21.34% |
 | EfficientNet-B0 | 18.41% |
 | EfficientNet-B2 | 14.64% |
 | MobileNetV3-Large | — |
 
-**ResNet-50 selected as the primary model:** strongest frozen baseline, 2,048-dimensional feature space, and residual connections that are robust to vanishing gradients. Loss uses `CrossEntropyLoss` with class weights (`w_c = sqrt(N/n_c)`) to handle class imbalance.
+ResNet-50 was selected for full fine-tuning based on its superior baseline performance.
+
+**Fine-tuning strategy (section 3.2 → 3.3):**
+- Frozen backbone with head-only training initially
+- Progressive unfreezing: `layer4` unlocked from epoch 1; `layer3` unlocked at epoch 15
+- Discriminative learning rates: backbone `lr=1e-5`, head `lr=1e-3`
+- Linear LR warm-up for the first 5 epochs
+- **MixUp** (α=0.4) applied during training to smooth decision boundaries
+- Label smoothing (ε=0.1) in `CrossEntropyLoss`
+- Gradient clipping (`max_norm=1.0`) to stabilise early backbone updates
+- Stronger dropout in the head (0.5 vs 0.2)
+- Early stopping monitored on **val accuracy** (patience=12) — not val loss, which is inflated by label smoothing
+
+**Best result:** ~61% validation accuracy at epoch 75 (Macro F1 ≈ 0.58).
 
 ---
 
-### 3.2 — Fine-Tuning & Adaptation
+## Setup
 
-ResNet-50 with partial backbone unfreezing (`layer4` only, `fine_tune_blocks=1`), discriminative learning rates (backbone: 1e-5, head: 1e-3), `ReduceLROnPlateau` (factor=0.3, patience=3), label smoothing (ε=0.1), gradient clipping (max_norm=1.0), early stopping (patience=7, monitoring `val_loss`).
+All notebooks are designed to run on **Google Colab** with a **T4 GPU**.
 
-**Outcome:** Early stopping fired prematurely at epoch 9. Root cause: label smoothing artificially inflates the val loss, causing the patience counter to fill before the model had time to adapt.
+1. Upload the dataset to Google Drive at:
+2. Open any notebook in Colab.
+3. Switch the runtime to **GPU (T4)**: `Runtime → Change runtime type → T4 GPU`.
+4. Mount Drive and run all cells.
 
----
-
-### 3.3 — Data Augmentation & Regularisation
-
-Addresses the premature stopping issue from 3.2. Full set of techniques applied:
-
-| Technique | Detail |
-|---|---|
-| Training augmentation | `RandomResizedCrop` (scale 0.7–1.0), H/V flips, ±15° rotation, `RandomErasing(p=0.2)` |
-| Validation | Clean only — resize 256 + `CenterCrop(224)` + normalize |
-| Dropout | Raised from 0.2 → **0.5** in the classification head |
-| MixUp | α=0.4 — blends image pairs and their labels during training |
-| LR warm-up | 5 linear epochs (0.1×lr → lr) to stabilise early head updates |
-| Progressive unfreezing | `layer3` unfrozen at epoch 15; optimizer rebuilt with `lr_head=5e-4` |
-| Early stopping | patience=12, monitored on **val_acc** (fixes the 3.2 problem) |
-
-**Outcome:** Full 80 epochs completed. Best val_acc = **61.09%** (epoch 75), Macro F1 ≈ 0.58. Train loss ≈ 0.92 vs val loss ≈ 1.51 — moderate overfitting expected given the small dataset. Learning plateaued after epoch 63.
+**Main dependencies** (pre-installed on Colab):
+- PyTorch (`torch`)
+- TorchVision (`torchvision`)
+- Scikit-learn (`scikit-learn`)
+- Pandas (`pandas`)
+- NumPy (`numpy`)
+- Matplotlib (`matplotlib`)
+- Seaborn (`seaborn`)
+- Pillow (`PIL`)
+- SciPy (`scipy`)
+- OpenCV (`opencv-python`)
+- Scikit-image (`scikit-image`)
 
 ---
 
-### 3.4 — Evaluation & Interpretation
+## Results Summary
 
-Per-class classification report, confusion matrix heatmap, and training curves (loss, accuracy, backbone LR, head LR plotted separately). Summary metrics: overall accuracy and balanced accuracy.
+| Model | Val Accuracy | Notes |
+|---|---|---|
+| MLP | — | Baseline; no spatial awareness |
+| Custom CNN | — | Spatial features, GAP head |
+| ResNet-50 (fine-tuned) | ~61% | Best overall; transfer learning |
 
-## Dependencies
+> Accuracy figures for MLP and CNN reflect Kaggle submission scores and may differ from local validation metrics depending on the run.
 
-```
-torch, torchvision, sklearn, matplotlib, seaborn
-pandas, numpy, PIL, cv2, skimage, scipy
-google.colab, CustomImageDataset  # local dataset module
-```
+---
+
+## Common Observations Across Tasks
+
+- **Rock** and **Fighting** are consistently the hardest types to classify (low sample count, visually ambiguous).
+- **Water**, **Poison**, and **Fire** are the best-classified types across all models.
+- Class imbalance is moderate and manageable with square-root class weighting.
+- Background clutter in images weakens pure colour-based signals (RGB statistics alone are not discriminative enough).
